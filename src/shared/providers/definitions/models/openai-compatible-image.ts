@@ -24,6 +24,32 @@ export function compatibleImageApiHeaders(apiHost: string): Record<string, strin
   return undefined
 }
 
+const AGNES_IMAGE_MODEL_PATTERN = /^agnes-image/i
+
+/** Agnes AI uses a non-standard image API: reference images and response_format live in extra_body. */
+function isAgnesImageModel(modelId: string): boolean {
+  return AGNES_IMAGE_MODEL_PATTERN.test(modelId)
+}
+
+function buildAgnesImageRequestBody(options: {
+  modelId: string
+  prompt: string
+  size?: string
+  images?: { imageUrl: string }[]
+}): Record<string, unknown> {
+  const { modelId, prompt, size, images } = options
+  const extraBody: Record<string, unknown> = { response_format: 'url' }
+  if (images?.length) {
+    extraBody.image = images.map((img) => img.imageUrl)
+  }
+  return {
+    model: modelId,
+    prompt,
+    ...(size ? { size } : {}),
+    extra_body: extraBody,
+  }
+}
+
 export async function generateImageWithOpenAICompatibleAPI(options: {
   apiKey: string
   apiHost: string
@@ -45,13 +71,15 @@ export async function generateImageWithOpenAICompatibleAPI(options: {
     ...(headers ?? {}),
   }
 
-  const body: Record<string, unknown> = {
-    model: modelId,
-    prompt,
-    n,
-    ...(size ? { size } : {}),
-    ...(images?.length ? { images: images.map((img) => ({ image_url: img.imageUrl })) } : {}),
-  }
+  const body: Record<string, unknown> = isAgnesImageModel(modelId)
+    ? buildAgnesImageRequestBody({ modelId, prompt, size, images })
+    : {
+        model: modelId,
+        prompt,
+        n,
+        ...(size ? { size } : {}),
+        ...(images?.length ? { images: images.map((img) => ({ image_url: img.imageUrl })) } : {}),
+      }
 
   const base = apiHost.replace(/\/+$/, '')
   const url = `${base}/images/generations`

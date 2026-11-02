@@ -161,6 +161,68 @@ describe('OpenAI-compatible image models', () => {
         })
       ).rejects.toThrow('Image generation response contains no image data')
     })
+
+    it('sends reference images and response_format in extra_body for Agnes image models', async () => {
+      const fetch = vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse({ data: [{ url: 'data:image/png;base64,iVBORw0KGgo=', b64_json: '', revised_prompt: '' }] })
+        )
+      await generateImageWithOpenAICompatibleAPI({
+        apiKey: 'k',
+        apiHost: 'https://api.agnes-ai.cn/v1',
+        modelId: 'agnes-image-2.1-flash',
+        prompt: 'make it orange',
+        n: 1,
+        size: '1024x1024',
+        images: [{ imageUrl: 'https://example.test/input.png' }],
+        fetch,
+      })
+
+      const [, init] = fetch.mock.calls[0]
+      expect(JSON.parse(String(init.body))).toEqual({
+        model: 'agnes-image-2.1-flash',
+        prompt: 'make it orange',
+        size: '1024x1024',
+        extra_body: {
+          response_format: 'url',
+          image: ['https://example.test/input.png'],
+        },
+      })
+    })
+
+    it('omits image from extra_body for Agnes text-to-image', async () => {
+      const fetch = vi.fn().mockResolvedValue(jsonResponse({ data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] }))
+      await generateImageWithOpenAICompatibleAPI({
+        apiKey: 'k',
+        apiHost: 'https://api.agnes-ai.cn/v1',
+        modelId: 'agnes-image-2.5-flash',
+        prompt: 'a red apple',
+        n: 1,
+        fetch,
+      })
+
+      const body = JSON.parse(String(fetch.mock.calls[0][1].body))
+      expect(body.extra_body).toEqual({ response_format: 'url' })
+      expect(body).not.toHaveProperty('images')
+    })
+
+    it('ignores the empty b64_json Agnes returns in url mode', async () => {
+      const fetch = vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse({ data: [{ url: 'data:image/png;base64,iVBORw0KGgo=', b64_json: '', revised_prompt: '' }] })
+        )
+      const result = await generateImageWithOpenAICompatibleAPI({
+        apiKey: 'k',
+        apiHost: 'https://api.agnes-ai.cn/v1',
+        modelId: 'agnes-image-2.0-flash',
+        prompt: 'p',
+        n: 1,
+        fetch,
+      })
+      expect(result).toEqual(['data:image/png;base64,iVBORw0KGgo='])
+    })
   })
 
   it('creates an image model through the OpenRouter provider', () => {
