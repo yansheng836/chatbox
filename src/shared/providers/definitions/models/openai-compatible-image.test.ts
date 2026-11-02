@@ -1,10 +1,7 @@
-import type { ProviderModelInfo } from 'src/shared/types'
 import type { ModelDependencies } from 'src/shared/types/adapters'
 import type { SentryScope } from 'src/shared/utils/sentry_adapter'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import CustomOpenAI from './custom-openai'
-import CustomOpenAIResponses from './custom-openai-responses'
-import { getOpenAIImageGenerationOptions } from './openai-compatible-image'
+import { generateImageWithOpenAICompatibleAPI, getOpenAIImageGenerationOptions } from './openai-compatible-image'
 import OpenRouter from './openrouter'
 
 const aiMocks = vi.hoisted(() => ({
@@ -17,13 +14,6 @@ vi.mock('ai', async (importOriginal) => {
     ...actual,
     generateImage: aiMocks.generateImage,
   }
-})
-
-const imageMocks = vi.hoisted(() => {
-  const imageModel = { modelId: 'image-model' }
-  const image = vi.fn(() => imageModel)
-  const createOpenAI = vi.fn(() => ({ image }))
-  return { createOpenAI, image, imageModel }
 })
 
 const openRouterMocks = vi.hoisted(() => {
@@ -39,31 +29,9 @@ const openRouterMocks = vi.hoisted(() => {
   return { createOpenRouter, imageModel, imageModelFactory }
 })
 
-vi.mock('@ai-sdk/openai', () => ({
-  createOpenAI: imageMocks.createOpenAI,
-}))
-
-vi.mock('@ai-sdk/openai-compatible', () => ({
-  createOpenAICompatible: vi.fn(() => ({
-    languageModel: vi.fn(),
-  })),
-}))
-
 vi.mock('@openrouter/ai-sdk-provider', () => ({
   createOpenRouter: openRouterMocks.createOpenRouter,
 }))
-
-class TestCustomOpenAI extends CustomOpenAI {
-  public exposeImageModel() {
-    return this.getImageModel()
-  }
-}
-
-class TestCustomOpenAIResponses extends CustomOpenAIResponses {
-  public exposeImageModel() {
-    return this.getImageModel()
-  }
-}
 
 class TestOpenRouter extends OpenRouter {
   public exposeImageModel() {
@@ -71,7 +39,7 @@ class TestOpenRouter extends OpenRouter {
   }
 }
 
-function createDependencies(): ModelDependencies {
+function createDependencies(overrides: Partial<ModelDependencies> = {}): ModelDependencies {
   return {
     request: {
       apiRequest: vi.fn(),
@@ -86,51 +54,20 @@ function createDependencies(): ModelDependencies {
       captureException: vi.fn(),
     },
     getRemoteConfig: vi.fn().mockReturnValue({ setting_chatboxai_first: false }),
+    ...overrides,
   }
+}
+
+function jsonResponse(body: unknown, init: { status?: number; headers?: Record<string, string> } = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status: init.status ?? 200,
+    headers: { 'Content-Type': 'application/json', ...(init.headers ?? {}) },
+  })
 }
 
 describe('OpenAI-compatible image models', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-  })
-
-  it('creates an image model for a custom OpenAI host', () => {
-    const model: ProviderModelInfo = { modelId: 'flux-local', type: 'image' }
-    const instance = new TestCustomOpenAI(
-      {
-        apiKey: 'custom-key',
-        apiHost: 'https://example.test/v1',
-        apiPath: '/chat/completions',
-        model,
-        useProxy: false,
-      },
-      createDependencies()
-    )
-
-    expect(instance.exposeImageModel()).toBe(imageMocks.imageModel)
-    expect(imageMocks.createOpenAI).toHaveBeenCalledWith(
-      expect.objectContaining({
-        apiKey: 'custom-key',
-        baseURL: 'https://example.test/v1',
-      })
-    )
-    expect(imageMocks.image).toHaveBeenCalledWith('flux-local')
-  })
-
-  it('creates an image model for custom OpenAI Responses hosts', () => {
-    const instance = new TestCustomOpenAIResponses(
-      {
-        apiKey: 'responses-key',
-        apiHost: 'https://proxy.test/v1',
-        apiPath: '/responses',
-        model: { modelId: 'gpt-image-1', type: 'image' },
-        useProxy: false,
-      },
-      createDependencies()
-    )
-
-    expect(instance.exposeImageModel()).toBe(imageMocks.imageModel)
-    expect(imageMocks.image).toHaveBeenCalledWith('gpt-image-1')
   })
 
   it('maps Image Creator aspect ratios to OpenAI image sizes', () => {
@@ -143,82 +80,87 @@ describe('OpenAI-compatible image models', () => {
     expect(getOpenAIImageGenerationOptions('dall-e-2', '3:2')).toEqual({})
   })
 
-  it('uses OpenAI image sizes for custom OpenAI-compatible generation', async () => {
-    aiMocks.generateImage.mockResolvedValue({ images: [] })
-    const instances = [
-      new TestCustomOpenAI(
-        {
-          apiKey: 'custom-key',
+  describe('generateImageWithOpenAICompatibleAPI', () => {
+    it('parses b64_json responses and tags the media type from magic bytes', async () => {
+      const fetch = vi.fn().mockResolvedValue(jsonResponse({ created: 1, data: [{ b64_json: '/9j/4AAQSkZJRgABAQ' }] }))
+      const result = await generateImageWithOpenAICompatibleAPI({
+        apiKey: 'k',
+        apiHost: 'https://example.test/v1',
+        modelId: 'gpt-image-2',
+        prompt: 'a red apple',
+        n: 1,
+        fetch,
+      })
+      expect(fetch).toHaveBeenCalledWith(
+        'https://example.test/v1/images/generations',
+        expect.objectContaining({ method: 'POST' })
+      )
+      expect(result).toEqual(['data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ'])
+    })
+
+    it('parses url data URLs without re-fetching', async () => {
+      const fetch = vi.fn().mockResolvedValue(jsonResponse({ data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] }))
+      const result = await generateImageWithOpenAICompatibleAPI({
+        apiKey: 'k',
+        apiHost: 'https://example.test/v1',
+        modelId: 'm',
+        prompt: 'p',
+        n: 1,
+        fetch,
+      })
+      expect(result).toEqual(['data:image/png;base64,iVBORw0KGgo='])
+      // Should not attempt a second fetch to resolve the data URL.
+      expect(fetch).toHaveBeenCalledOnce()
+    })
+
+    it('extracts the server error message on failure', async () => {
+      const fetch = vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse(
+            { error: { message: '分组 Free 下模型 gpt-image-2 的可用渠道不存在', type: 'new_api_error' } },
+            { status: 500 }
+          )
+        )
+      await expect(
+        generateImageWithOpenAICompatibleAPI({
+          apiKey: 'k',
           apiHost: 'https://example.test/v1',
-          apiPath: '/chat/completions',
-          model: { modelId: 'flux-local', type: 'image' },
-          useProxy: false,
-        },
-        createDependencies()
-      ),
-      new TestCustomOpenAIResponses(
-        {
-          apiKey: 'responses-key',
-          apiHost: 'https://proxy.test/v1',
-          apiPath: '/responses',
-          model: { modelId: 'gpt-image-1', type: 'image' },
-          useProxy: false,
-        },
-        createDependencies()
-      ),
-    ]
+          modelId: 'gpt-image-2',
+          prompt: 'p',
+          n: 1,
+          fetch,
+        })
+      ).rejects.toThrow('分组 Free 下模型 gpt-image-2 的可用渠道不存在')
+    })
 
-    for (const instance of instances) {
-      await instance.paint({ prompt: 'wide landscape', num: 1, aspectRatio: '3:2' })
-    }
-
-    expect(aiMocks.generateImage).toHaveBeenCalledTimes(2)
-    for (const [options] of aiMocks.generateImage.mock.calls) {
-      expect(options).toEqual(expect.objectContaining({ size: '1536x1024' }))
-      expect(options).not.toHaveProperty('aspectRatio')
-    }
-  })
-
-  it('persists each custom OpenAI-compatible image before starting the next request', async () => {
-    const instances = [
-      new TestCustomOpenAI(
-        {
-          apiKey: 'custom-key',
+    it('falls back to a status-based message when the error body is not JSON', async () => {
+      const fetch = vi.fn().mockResolvedValue(new Response('Gateway Error', { status: 502 }))
+      await expect(
+        generateImageWithOpenAICompatibleAPI({
+          apiKey: 'k',
           apiHost: 'https://example.test/v1',
-          apiPath: '/chat/completions',
-          model: { modelId: 'flux-local', type: 'image' },
-          useProxy: false,
-        },
-        createDependencies()
-      ),
-      new TestCustomOpenAIResponses(
-        {
-          apiKey: 'responses-key',
-          apiHost: 'https://proxy.test/v1',
-          apiPath: '/responses',
-          model: { modelId: 'gpt-image-1', type: 'image' },
-          useProxy: false,
-        },
-        createDependencies()
-      ),
-    ]
+          modelId: 'm',
+          prompt: 'p',
+          n: 1,
+          fetch,
+        })
+      ).rejects.toThrow('Image generation failed with status 502')
+    })
 
-    for (const instance of instances) {
-      const callback = vi.fn()
-      const secondError = new Error('second image failed')
-      aiMocks.generateImage
-        .mockResolvedValueOnce({ images: [{ mediaType: 'image/png', base64: 'first-image' }] })
-        .mockRejectedValueOnce(secondError)
-
-      await expect(instance.paint({ prompt: 'two images', num: 2 }, undefined, callback)).rejects.toBe(secondError)
-
-      expect(aiMocks.generateImage).toHaveBeenCalledTimes(2)
-      expect(aiMocks.generateImage).toHaveBeenNthCalledWith(1, expect.objectContaining({ n: 1 }))
-      expect(aiMocks.generateImage).toHaveBeenNthCalledWith(2, expect.objectContaining({ n: 1 }))
-      expect(callback).toHaveBeenCalledOnce()
-      expect(callback).toHaveBeenCalledWith('data:image/png;base64,first-image')
-      vi.clearAllMocks()
-    }
+    it('throws when the response contains no image data', async () => {
+      const fetch = vi.fn().mockResolvedValue(jsonResponse({ data: [] }))
+      await expect(
+        generateImageWithOpenAICompatibleAPI({
+          apiKey: 'k',
+          apiHost: 'https://example.test/v1',
+          modelId: 'm',
+          prompt: 'p',
+          n: 1,
+          fetch,
+        })
+      ).rejects.toThrow('Image generation response contains no image data')
+    })
   })
 
   it('creates an image model through the OpenRouter provider', () => {
@@ -241,12 +183,6 @@ describe('OpenAI-compatible image models', () => {
       fetch: expect.any(Function),
     })
     expect(openRouterMocks.imageModelFactory).toHaveBeenCalledWith('google/gemini-3-pro-image')
-    expect(imageMocks.createOpenAI).not.toHaveBeenCalledWith(
-      expect.objectContaining({
-        apiKey: 'or-key',
-        baseURL: 'https://openrouter.ai/api/v1',
-      })
-    )
   })
 
   it('passes OpenRouter reference images through the AI SDK image prompt', async () => {

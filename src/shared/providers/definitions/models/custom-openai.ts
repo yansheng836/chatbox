@@ -11,7 +11,7 @@ import { normalizeOpenAIApiHostAndPath } from '../../../utils/llm_utils'
 import { pickOpenAICompatibleReasoningOptions } from '../../../utils/reasoning-control'
 import {
   compatibleImageApiHeaders,
-  createOpenAICompatibleImageModel,
+  generateImageWithOpenAICompatibleAPI,
   getOpenAIImageGenerationOptions,
 } from './openai-compatible-image'
 
@@ -106,16 +106,43 @@ export default class CustomOpenAI extends AbstractAISDKModel {
     )
   }
 
-  protected getImageModel() {
+  public async paint(
+    params: {
+      prompt: string
+      images?: { imageUrl: string }[]
+      num: number
+      aspectRatio?: string
+    },
+    signal?: AbortSignal,
+    callback?: (picBase64: string) => void | Promise<void>
+  ): Promise<string[]> {
     const modelId = this.options.model.modelId
-    if (!modelId) return null
-    return createOpenAICompatibleImageModel({
-      apiKey: this.options.apiKey,
-      apiHost: this.options.apiHost,
-      modelId,
-      fetch: createFetchWithProxy(this.options.useProxy, this.dependencies),
-      headers: compatibleImageApiHeaders(this.options.apiHost),
-    })
+    if (!modelId) {
+      throw new Error('Model ID is required for image generation')
+    }
+
+    const size = Object.entries(this.getImageGenerationOptions(params.aspectRatio)).find(([key]) => key === 'size')?.[1]
+
+    const dataUrls: string[] = []
+    for (let i = 0; i < params.num; i++) {
+      const urls = await generateImageWithOpenAICompatibleAPI({
+        apiKey: this.options.apiKey,
+        apiHost: this.options.apiHost,
+        modelId,
+        prompt: params.prompt,
+        n: 1,
+        size,
+        images: params.images,
+        signal,
+        fetch: createFetchWithProxy(this.options.useProxy, this.dependencies),
+        headers: compatibleImageApiHeaders(this.options.apiHost),
+      })
+      for (const url of urls) {
+        await callback?.(url)
+        dataUrls.push(url)
+      }
+    }
+    return dataUrls
   }
 
   protected override getImageGenerationOptions(aspectRatio?: string) {
